@@ -11,6 +11,8 @@ import type {
   TestModelRequest,
   DiscoverModelsResponse,
   ProbeMultimodalResponse,
+  DeviceAuthStartResponse,
+  DeviceAuthPollResponse,
 } from "../types";
 
 export const providerApi = {
@@ -94,6 +96,25 @@ export const providerApi = {
       `/models/${encodeURIComponent(providerId)}/models/${encodeURIComponent(
         modelId,
       )}/probe-multimodal`,
+      { method: "POST" },
+    ),
+
+  startDeviceAuth: (providerId: string) =>
+    request<DeviceAuthStartResponse>(
+      `/models/${encodeURIComponent(providerId)}/auth/device/start`,
+      { method: "POST" },
+    ),
+
+  pollDeviceAuth: (providerId: string, sessionId: string) =>
+    request<DeviceAuthPollResponse>(
+      `/models/${encodeURIComponent(providerId)}/auth/device/${encodeURIComponent(
+        sessionId,
+      )}`,
+    ),
+
+  logoutProviderAuth: (providerId: string) =>
+    request<ProviderInfo>(
+      `/models/${encodeURIComponent(providerId)}/auth/logout`,
       { method: "POST" },
     ),
 };
