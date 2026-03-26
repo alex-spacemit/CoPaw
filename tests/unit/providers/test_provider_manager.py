@@ -393,7 +393,7 @@ def test_provider_from_data_dispatch_to_github_copilot(
         {
             "id": "github-copilot",
             "name": "GitHub Copilot",
-            "base_url": "https://api.githubcopilot.com",
+            "base_url": "https://api.individual.githubcopilot.com",
             "require_api_key": False,
             "support_model_discovery": True,
             "freeze_url": True,

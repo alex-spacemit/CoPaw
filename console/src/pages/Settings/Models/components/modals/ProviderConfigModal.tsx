@@ -368,7 +368,7 @@ export function ProviderConfigModal({
       return "https://api.openai.com/v1";
     }
     if (provider.id === "github-copilot") {
-      return "https://api.githubcopilot.com";
+      return "https://api.individual.githubcopilot.com";
     }
     if (provider.id === "ollama") {
       return "http://localhost:11434";

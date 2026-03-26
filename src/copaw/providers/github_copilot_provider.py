@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import secrets
+import re
 import time
 from typing import Any
 
@@ -11,8 +12,8 @@ import httpx
 from openai import APIError, AsyncOpenAI
 from pydantic import BaseModel, Field, PrivateAttr
 
-from .openai_chat_model_compat import OpenAIChatModelCompat
 from .openai_provider import OpenAIProvider
+from .openai_responses_chat_model_compat import OpenAIResponsesChatModelCompat
 from .provider import ModelInfo, ProviderInfo
 
 
@@ -21,7 +22,7 @@ GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
 GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
-GITHUB_COPILOT_API_URL = "https://api.githubcopilot.com"
+GITHUB_COPILOT_API_URL = "https://api.individual.githubcopilot.com"
 DEFAULT_COPILOT_TOKEN_TTL = 25 * 60
 COPILOT_TOKEN_REFRESH_SKEW = 60
 
@@ -84,12 +85,78 @@ class GitHubCopilotProvider(OpenAIProvider):
             and expires_at > int(time.time()) + COPILOT_TOKEN_REFRESH_SKEW,
         )
 
+    @staticmethod
+    def _derive_copilot_base_url_from_token(token: str) -> str | None:
+        trimmed = token.strip()
+        if not trimmed:
+            return None
+
+        match = re.search(r"(?:^|;)\s*proxy-ep=([^;\s]+)", trimmed, re.IGNORECASE)
+        proxy_ep = match.group(1).strip() if match else ""
+        if not proxy_ep:
+            return None
+
+        host = re.sub(r"^https?://", "", proxy_ep, flags=re.IGNORECASE)
+        host = re.sub(r"^proxy\.", "api.", host, flags=re.IGNORECASE)
+        if not host:
+            return None
+        return f"https://{host}"
+
+    def _resolve_copilot_base_url(
+        self,
+        payload: dict[str, Any] | None = None,
+        token: str | None = None,
+    ) -> str:
+        payload = payload or {}
+
+        endpoint = payload.get("endpoint") or payload.get("api_url")
+        if isinstance(endpoint, str) and endpoint.strip():
+            return endpoint.strip().rstrip("/")
+
+        endpoints = payload.get("endpoints")
+        if isinstance(endpoints, dict):
+            api_endpoint = endpoints.get("api") or endpoints.get("chat")
+            if isinstance(api_endpoint, str) and api_endpoint.strip():
+                return api_endpoint.strip().rstrip("/")
+
+        derived = self._derive_copilot_base_url_from_token(token or "")
+        if derived:
+            return derived.rstrip("/")
+        return GITHUB_COPILOT_API_URL
+
     def _sync_client(self, timeout: float = 10) -> httpx.Client:
         return httpx.Client(timeout=timeout, follow_redirects=True)
 
     def _client(self, timeout: float = 5) -> AsyncOpenAI:
         return AsyncOpenAI(
             base_url=self.base_url,
+            api_key=self.copilot_access_token or self.api_key,
+            timeout=timeout,
+            default_headers=self._copilot_api_headers(),
+        )
+
+    def _ensure_copilot_base_url_consistency(self) -> str:
+        resolved_base_url = self._resolve_copilot_base_url(
+            token=self.copilot_access_token,
+        ).rstrip("/")
+        current_base_url = (self.base_url or "").strip().rstrip("/")
+        if current_base_url != resolved_base_url:
+            self.base_url = resolved_base_url
+        return resolved_base_url
+
+    def _copilot_discovery_client(self, timeout: float = 5) -> AsyncOpenAI:
+        base_url = self._ensure_copilot_base_url_consistency()
+        return AsyncOpenAI(
+            base_url=base_url,
+            api_key=self.copilot_access_token or self.api_key,
+            timeout=timeout,
+            default_headers=self._copilot_api_headers(),
+        )
+
+    def _copilot_responses_client(self, timeout: float = 5) -> AsyncOpenAI:
+        base_url = self._ensure_copilot_base_url_consistency()
+        return AsyncOpenAI(
+            base_url=base_url,
             api_key=self.copilot_access_token or self.api_key,
             timeout=timeout,
             default_headers=self._copilot_api_headers(),
@@ -208,6 +275,9 @@ class GitHubCopilotProvider(OpenAIProvider):
 
     async def _refresh_copilot_token_async(self, timeout: float = 10) -> None:
         if self._copilot_token_valid():
+            self.base_url = self._resolve_copilot_base_url(
+                token=self.copilot_access_token,
+            )
             self.api_key = self.copilot_access_token
             return
         if not self.github_oauth_token:
@@ -231,6 +301,9 @@ class GitHubCopilotProvider(OpenAIProvider):
 
     def _refresh_copilot_token_sync(self, timeout: float = 10) -> None:
         if self._copilot_token_valid():
+            self.base_url = self._resolve_copilot_base_url(
+                token=self.copilot_access_token,
+            )
             self.api_key = self.copilot_access_token
             return
         if not self.github_oauth_token:
@@ -259,6 +332,7 @@ class GitHubCopilotProvider(OpenAIProvider):
         self.copilot_access_token = token
         self.copilot_token_expires_at = int(expires_at)
         self.auth_expires_at = self.copilot_token_expires_at
+        self.base_url = self._resolve_copilot_base_url(payload=payload, token=token)
         self.api_key = token
 
     async def check_connection(self, timeout: float = 5) -> tuple[bool, str]:
@@ -266,7 +340,7 @@ class GitHubCopilotProvider(OpenAIProvider):
             return False, "GitHub authorization required"
         try:
             await self._refresh_copilot_token_async(timeout=timeout)
-            client = self._client(timeout=timeout)
+            client = self._copilot_discovery_client(timeout=timeout)
             await client.models.list(timeout=timeout)
             return True, ""
         except APIError as exc:
@@ -279,7 +353,7 @@ class GitHubCopilotProvider(OpenAIProvider):
             return []
         try:
             await self._refresh_copilot_token_async(timeout=timeout)
-            client = self._client(timeout=timeout)
+            client = self._copilot_discovery_client(timeout=timeout)
             payload = await client.models.list(timeout=timeout)
             return self._normalize_models_payload(payload)
         except APIError:
@@ -294,12 +368,42 @@ class GitHubCopilotProvider(OpenAIProvider):
     ) -> tuple[bool, str]:
         if not self.github_oauth_token:
             return False, "GitHub authorization required"
-        await self._refresh_copilot_token_async(timeout=timeout)
-        return await super().check_model_connection(model_id=model_id, timeout=timeout)
+        model_id = (model_id or "").strip()
+        if not model_id:
+            return False, "Empty model ID"
+
+        try:
+            await self._refresh_copilot_token_async(timeout=timeout)
+            client = self._copilot_responses_client(timeout=timeout)
+            await client.responses.create(
+                model=model_id,
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "ping",
+                            },
+                        ],
+                    },
+                ],
+                max_output_tokens=1,
+                timeout=timeout,
+            )
+            return True, ""
+        except APIError as exc:
+            return False, f"API error when connecting to model '{model_id}': {exc}"
+        except Exception as exc:
+            return (
+                False,
+                f"Unknown exception when connecting to model '{model_id}': {exc}",
+            )
 
     def get_chat_model_instance(self, model_id: str):
         self._refresh_copilot_token_sync(timeout=10)
-        return OpenAIChatModelCompat(
+        return OpenAIResponsesChatModelCompat(
             model_name=model_id,
             stream=True,
             api_key=self.copilot_access_token,
