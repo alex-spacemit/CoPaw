@@ -3,6 +3,7 @@ import type {
   ProviderInfo,
   ProviderConfigRequest,
   ActiveModelsInfo,
+  GetActiveModelsRequest,
   ModelSlotRequest,
   CreateCustomProviderRequest,
   AddModelRequest,
@@ -15,6 +16,22 @@ import type {
   DeviceAuthPollResponse,
 } from "../types";
 
+function buildActiveModelQuery(params?: GetActiveModelsRequest): string {
+  if (!params?.scope && !params?.agent_id) {
+    return "/models/active";
+  }
+
+  const searchParams = new URLSearchParams();
+  if (params.scope) {
+    searchParams.set("scope", params.scope);
+  }
+  if (params.agent_id) {
+    searchParams.set("agent_id", params.agent_id);
+  }
+
+  return `/models/active?${searchParams.toString()}`;
+}
+
 export const providerApi = {
   listProviders: () => request<ProviderInfo[]>("/models"),
 
@@ -24,7 +41,8 @@ export const providerApi = {
       body: JSON.stringify(body),
     }),
 
-  getActiveModels: () => request<ActiveModelsInfo>("/models/active"),
+  getActiveModels: (params?: GetActiveModelsRequest) =>
+    request<ActiveModelsInfo>(buildActiveModelQuery(params)),
 
   setActiveLlm: (body: ModelSlotRequest) =>
     request<ActiveModelsInfo>("/models/active", {
